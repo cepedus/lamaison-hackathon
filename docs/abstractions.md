@@ -98,30 +98,36 @@ independent grader, and either iterates (`needs_revision`) or terminates
 (`satisfied` / `max_iterations_reached` / `failed`). We send the outcome
 once per session and watch for `span.outcome_evaluation_end`.
 
-### MCP server (GitHub) — `Orchestrator.setup`
+### Custom tools — `src/cleaner/session.py`
 
-The GitHub MCP server (`https://api.githubcopilot.com/mcp/`) is declared
-on every agent. It exposes tools for opening PRs, creating issues, and
-reading repo metadata. Credentials live in a **vault** that the user
-attaches to each session via `vault_ids`.
+Two custom tools are declared on every phase's agent. Both follow the
+same pattern: the agent emits `agent.custom_tool_use`, the orchestrator
+performs the side effect host-side, and replies with
+`user.custom_tool_result`. Neither requires a vault — credentials stay
+in the orchestrator process.
 
-The GitHub MCP credential is **not** the same as the
-`authorization_token` on the `github_repository` resource: that token
-authenticates `git clone`/`git push` through Anthropic's git proxy, never
-touching the container; the MCP credential is what authenticates PR
-creation calls.
+**`ask_human`** — The escape hatch for decisions that should not be
+made autonomously. The orchestrator blocks on a `HumanInput` callable
+(default: stdin). We chose a custom tool rather than prompt
+scaffolding ("stop and confirm before X") because a tool call is a
+hard handshake the model can't ignore by accident.
 
-### Custom tool (`ask_human`) — `src/cleaner/session.py::ASK_HUMAN_TOOL`
+**`create_pull_request`** — Replaces what would otherwise be a GitHub
+MCP server call. The orchestrator takes the tool inputs (title, body,
+branch, base), pulls owner/repo from the run's `repo_url`, and POSTs
+`/repos/{owner}/{repo}/pulls` against the GitHub REST API using the
+user's PAT. Same PAT that authenticates the `github_repository`
+resource's `authorization_token` — Anthropic's git proxy uses it for
+`git push`, and the orchestrator uses it for PR creation.
 
-The escape hatch for decisions that should not be made autonomously.
-Declared on every phase's agent. When the agent calls it, the session
-fires `agent.custom_tool_use`; the orchestrator catches the event,
-blocks on a `HumanInput` callable (default: stdin), and replies with
-`user.custom_tool_result`.
-
-We chose a custom tool rather than relying on prompt scaffolding ("stop
-and confirm before X") because a tool call is a hard handshake the model
-can't ignore by accident.
+**Why no MCP / no vault:** the only GitHub capability the cleaner needs
+beyond clone/push is "open a PR." A single custom tool covers it, the
+PAT we already require covers the auth, and the credential boundary
+holds (the token is read by the host process from `CLEANER_GITHUB_TOKEN`
+and never enters the session container). This is the host-side
+credentials pattern from the Managed Agents skill — preferred whenever
+the agent's only external dependency is one or two API calls that the
+orchestrator can just make itself.
 
 ## Event-loop contract
 

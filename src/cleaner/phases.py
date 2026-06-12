@@ -70,9 +70,10 @@ Operating contract:
 - Memory store contents persist across phases. Read existing notes before
   starting; write new findings as you discover them.
 
-When the rubric is satisfied, push the branch and open a pull request via
-the GitHub MCP server. The PR body must summarize what changed and link to
-any flagged.md entries this phase added.
+When the rubric is satisfied, push the branch with `git push` and open a
+pull request by calling the `create_pull_request` tool. The PR body must
+summarize what changed and link to any flagged.md entries this phase
+added.
 """
 
 

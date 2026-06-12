@@ -144,10 +144,15 @@ Explicit scope cuts for this session:
   implement the consolidation pattern from
   `managed-agents-events.md` → Reconnecting after a dropped stream.
 
-- **No vault provisioning helper.** The user creates the GitHub MCP vault
-  out-of-band (Console or `ant beta:vaults create`) and passes the ID via
-  `CLEANER_GITHUB_VAULT_ID`. A `cleaner provision-vault` subcommand could
-  automate this.
+- **No vault, no GitHub MCP server.** Originally the cleaner relied on
+  the GitHub MCP server (and a Managed Agents vault holding its OAuth
+  credential) for PR creation. We replaced that with a host-side
+  `create_pull_request` custom tool: the agent calls the tool, the
+  orchestrator handles the GitHub REST POST using the user's PAT. One
+  fewer required setup step, the same credential boundary (token stays
+  in the orchestrator process, never enters the container), and the
+  same PAT already used for clone/push. See `docs/abstractions.md` →
+  *Custom tools* for the pattern.
 
 - **No actual run against a live target.** The API surface is exercised
   by type-check and import only; nothing has been driven end-to-end yet.

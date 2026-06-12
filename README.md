@@ -38,11 +38,14 @@ system prompts and rubrics.
 
 Required environment:
 
-| Variable                    | Required for | What it is                                                 |
-| --------------------------- | ------------ | ---------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`         | all          | Your Anthropic API key.                                    |
-| `CLEANER_GITHUB_TOKEN`      | `run`        | Fine-grained PAT with `Contents: Read and write` on target.|
-| `CLEANER_GITHUB_VAULT_ID`   | `run`        | Vault holding the GitHub MCP OAuth credential.             |
+| Variable                    | Required for | What it is                                                                                  |
+| --------------------------- | ------------ | ------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`         | all          | Your Anthropic API key.                                                                     |
+| `CLEANER_GITHUB_TOKEN`      | `run`        | Fine-grained PAT with `Contents: Read and write` *and* `Pull requests: Read and write`.    |
+
+No Managed Agents vault is required — PR creation is performed
+host-side by the orchestrator using `CLEANER_GITHUB_TOKEN`, so the token
+never enters the session container.
 
 Provision cloud resources for a target repo (idempotent):
 

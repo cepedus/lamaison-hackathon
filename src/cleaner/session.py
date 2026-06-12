@@ -12,10 +12,15 @@ This module owns the event-loop semantics that every phase share:
   ``session.status_terminated``, *or* on ``session.status_idle`` whose
   ``stop_reason.type`` is *not* ``requires_action``.
 
-- **Custom tool round-trip.** Phases declare an ``ask_human`` custom tool
-  for unsafe-to-decide-alone questions. When the agent emits
-  ``agent.custom_tool_use`` for it, we reply with
-  ``user.custom_tool_result`` keyed by the event's ID.
+- **Custom tool round-trip.** Phases declare two custom tools:
+  ``ask_human`` for unsafe-to-decide-alone questions, and
+  ``create_pull_request`` for opening PRs. Both follow the same pattern:
+  the agent emits ``agent.custom_tool_use``, the orchestrator executes
+  the side effect (prompting the human, or calling the GitHub REST API
+  with the user's PAT), and replies with ``user.custom_tool_result``
+  keyed by the event's ID. The PAT never enters the container — this is
+  the host-side-credentials pattern that lets us avoid a Managed Agents
+  vault entirely.
 
 - **Terminal outcome tracking.** The grader emits
   ``span.outcome_evaluation_end`` with a ``result`` field. We record the
@@ -28,10 +33,14 @@ hackathon timeframe, restart-by-resume is simpler than mid-flight recovery.
 
 from __future__ import annotations
 
+import json
 import sys
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import IO, Literal
+from typing import IO, Any, Literal
+from urllib.parse import urlparse
 
 from anthropic import Anthropic
 
@@ -93,10 +102,12 @@ def default_human_input(question: str, context: str) -> str:
     return input("Answer> ").strip() or "no preference; agent decides"
 
 
-# Tool definition installed on every phase's agent. Declared here (not on
-# Phase) because the spec is invariant across phases — only the prompts
-# differ. The agent learns about it from its tools list; the orchestrator
-# learns what to expect from this constant.
+# --- Custom tools installed on every phase's agent --------------------
+#
+# Both tools follow the same shape: the agent calls them and the
+# orchestrator handles the side effect host-side. Neither requires the
+# credential to be exposed to the session container.
+
 ASK_HUMAN_TOOL = {
     "type": "custom",
     "name": "ask_human",
@@ -129,6 +140,98 @@ ASK_HUMAN_TOOL = {
 }
 
 
+CREATE_PR_TOOL = {
+    "type": "custom",
+    "name": "create_pull_request",
+    "description": (
+        "Open a pull request on the target repository. Call this after "
+        "pushing your branch with `git push`. The orchestrator "
+        "authenticates with the user's GitHub PAT and the token never "
+        "enters the container."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "PR title."},
+            "body": {
+                "type": "string",
+                "description": "PR description in Markdown.",
+            },
+            "head_branch": {
+                "type": "string",
+                "description": ("Branch to merge from — typically cleaner/<NN>-<slug>."),
+            },
+            "base_branch": {
+                "type": "string",
+                "description": "Branch to merge into. Defaults to main.",
+                "default": "main",
+            },
+        },
+        "required": ["title", "body", "head_branch"],
+        "additionalProperties": False,
+    },
+}
+
+
+def extract_owner_repo(repo_url: str) -> tuple[str, str]:
+    """Parse ``owner`` and ``repo`` out of a GitHub URL.
+
+    Accepts ``https://github.com/owner/repo`` with or without a trailing
+    ``.git`` and with arbitrary trailing path segments (which are
+    ignored). Raises ``ValueError`` on anything that doesn't fit.
+    """
+    parsed = urlparse(repo_url)
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"cannot parse owner/repo from {repo_url!r}")
+    owner, repo = parts[0], parts[1]
+    if repo.endswith(".git"):
+        repo = repo[: -len(".git")]
+    return owner, repo
+
+
+def _create_github_pr(
+    token: str,
+    owner: str,
+    repo: str,
+    *,
+    head: str,
+    base: str,
+    title: str,
+    body: str,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Open a PR via the GitHub REST API. Pure function — no I/O on
+    Anthropic side. Returns a dict the agent can read.
+
+    On success: ``{"ok": True, "url": "...", "number": N}``.
+    On failure: ``{"ok": False, "status": N, "error": "..."}``.
+
+    Returning structured failures lets the agent decide whether to retry
+    (e.g. branch not yet pushed → 422) or escalate.
+    """
+    payload = json.dumps({"title": title, "body": body, "head": head, "base": base}).encode()
+    req = urllib.request.Request(
+        url=f"https://api.github.com/repos/{owner}/{repo}/pulls",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed scheme
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "status": exc.code, "error": exc.read().decode("utf-8", "replace")}
+    except urllib.error.URLError as exc:
+        return {"ok": False, "status": 0, "error": str(exc.reason)}
+    return {"ok": True, "url": data.get("html_url"), "number": data.get("number")}
+
+
 def run_phase(
     client: Anthropic,
     *,
@@ -138,7 +241,6 @@ def run_phase(
     repo_url: str,
     github_token: str,
     phase: Phase,
-    vault_ids: list[str] | None = None,
     human_input: HumanInput = default_human_input,
     stream_to: IO[str] = sys.stdout,
 ) -> PhaseRun:
@@ -151,13 +253,13 @@ def run_phase(
         memory_store_id: Shared memory store. Mounted at
             ``/mnt/memory/cleaner-notes`` so phases can read/write notes.
         repo_url: Target GitHub repository URL.
-        github_token: Token used to clone the repo and push branches. Must
-            grant ``Contents: Read and write``; PR creation goes through the
-            GitHub MCP server, not this token.
+        github_token: PAT used by Anthropic's git proxy to clone the
+            repo and accept branch pushes — *and*, host-side, by the
+            orchestrator to open PRs via the GitHub REST API in response
+            to ``create_pull_request`` tool calls. Must grant
+            ``Contents: Read and write`` and ``Pull requests: Read and
+            write`` on the target repo.
         phase: The phase whose rubric drives this session.
-        vault_ids: Vaults holding MCP credentials (notably the GitHub MCP
-            OAuth credential used to open PRs). Empty/None means no MCP
-            auth — fine if no MCP-backed tool is invoked.
         human_input: Implementation of the ``ask_human`` checkpoint.
         stream_to: Where to mirror live agent text (default: stdout). Pass a
             no-op file-like for silent runs.
@@ -169,7 +271,6 @@ def run_phase(
         agent=agent_id,
         environment_id=environment_id,
         title=f"cleaner: {phase.slug} on {repo_url}",
-        vault_ids=list(vault_ids) if vault_ids else [],
         resources=[
             {
                 "type": "github_repository",
@@ -243,6 +344,28 @@ def run_phase(
                             }
                         ],
                     )
+                elif tool_name == "create_pull_request":
+                    owner, repo = extract_owner_repo(repo_url)
+                    pr_result = _create_github_pr(
+                        github_token,
+                        owner,
+                        repo,
+                        head=tool_input.get("head_branch", ""),
+                        base=tool_input.get("base_branch", "main"),
+                        title=tool_input.get("title", ""),
+                        body=tool_input.get("body", ""),
+                    )
+                    client.beta.sessions.events.send(
+                        session_id=session.id,
+                        events=[
+                            {
+                                "type": "user.custom_tool_result",
+                                "custom_tool_use_id": tool_use_event_id,
+                                "content": [{"type": "text", "text": json.dumps(pr_result)}],
+                                "is_error": not pr_result.get("ok", False),
+                            }
+                        ],
+                    )
                 else:
                     # Unknown custom tool — surface as an error result so
                     # the agent knows not to retry blindly.
@@ -259,7 +382,8 @@ def run_phase(
                                             f"Unknown custom tool: "
                                             f"{tool_name!r}. The "
                                             "orchestrator only handles "
-                                            "ask_human."
+                                            "ask_human and "
+                                            "create_pull_request."
                                         ),
                                     }
                                 ],

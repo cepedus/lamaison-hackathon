@@ -10,10 +10,12 @@ Credentials flow through environment variables, not flags, so they don't
 leak into shell history:
 
 - ``ANTHROPIC_API_KEY`` — required for every subcommand.
-- ``CLEANER_GITHUB_TOKEN`` — required for ``run``. Fine-grained PAT with
-  ``Contents: Read and write`` on the target repo.
-- ``CLEANER_GITHUB_VAULT_ID`` — required for ``run``. Vault holding the
-  GitHub MCP OAuth credential used to open PRs.
+- ``CLEANER_GITHUB_TOKEN`` — required for ``run``. Fine-grained PAT
+  granting ``Contents: Read and write`` *and* ``Pull requests: Read
+  and write`` on the target repo. The PAT authenticates both git
+  operations (clone/push, routed through Anthropic's git proxy) and PR
+  creation (called host-side by the orchestrator). No Managed Agents
+  vault is needed.
 """
 
 from __future__ import annotations
@@ -58,14 +60,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     """Advance the pipeline from the last completed phase."""
     github_token = _require_env("CLEANER_GITHUB_TOKEN")
-    vault_id = _require_env("CLEANER_GITHUB_VAULT_ID")
     client = Anthropic()
     orch = Orchestrator(client)
     try:
         summary = orch.run(
             args.repo_url,
             github_token=github_token,
-            github_vault_id=vault_id,
         )
     except SelfCleaningRefused as exc:
         print(f"error: {exc}", file=sys.stderr)

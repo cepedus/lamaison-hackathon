@@ -33,19 +33,20 @@ from anthropic import Anthropic
 
 from cleaner import safety, state
 from cleaner.phases import PHASES, Phase
-from cleaner.session import ASK_HUMAN_TOOL, HumanInput, PhaseRun, default_human_input, run_phase
+from cleaner.session import (
+    ASK_HUMAN_TOOL,
+    CREATE_PR_TOOL,
+    HumanInput,
+    PhaseRun,
+    default_human_input,
+    run_phase,
+)
 
 MODEL = "claude-opus-4-7"
 """Model used for every phase agent. Opus 4.7 is the recommended default
 for coding and agentic work — it follows the rubrics carefully and uses
 tools well. Override on a per-phase basis if a phase's cost profile
 warrants it.
-"""
-
-GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
-"""GitHub's hosted MCP server. Used for PR creation; clone/push happens via
-the ``github_repository`` resource's authorization token, which is routed
-through Anthropic's git proxy and never enters the container.
 """
 
 
@@ -123,9 +124,9 @@ class Orchestrator:
         for phase in PHASES:
             if phase.slug in run_state.agent_ids:
                 continue
-            # The Tool union and MCP server param types are heterogeneous;
-            # the SDK accepts these dict shapes per the docs but pyrefly
-            # can't narrow them through the literals. Cast at the boundary.
+            # The Tool union is heterogeneous; the SDK accepts these dict
+            # shapes per the docs but pyrefly can't narrow them through
+            # the literals. Cast at the boundary.
             tools = cast(
                 Any,
                 [
@@ -133,13 +134,9 @@ class Orchestrator:
                         "type": "agent_toolset_20260401",
                         "default_config": {"enabled": True},
                     },
-                    {"type": "mcp_toolset", "mcp_server_name": "github"},
                     ASK_HUMAN_TOOL,
+                    CREATE_PR_TOOL,
                 ],
-            )
-            mcp_servers = cast(
-                Any,
-                [{"type": "url", "name": "github", "url": GITHUB_MCP_URL}],
             )
             agent = self.client.beta.agents.create(
                 name=f"cleaner/{phase.slug}",
@@ -147,7 +144,6 @@ class Orchestrator:
                 model=MODEL,
                 system=phase.system,
                 tools=tools,
-                mcp_servers=mcp_servers,
             )
             run_state.agent_ids[phase.slug] = agent.id
 
@@ -159,7 +155,6 @@ class Orchestrator:
         repo_url: str,
         *,
         github_token: str,
-        github_vault_id: str,
         human_input: HumanInput = default_human_input,
         stream_to: IO[str] = sys.stdout,
     ) -> RunSummary:
@@ -167,10 +162,11 @@ class Orchestrator:
 
         Args:
             repo_url: Target repository. Must have been set up already.
-            github_token: PAT used to clone and push branches. ``Contents:
-                Read and write`` scope.
-            github_vault_id: Vault holding the GitHub MCP OAuth credential
-                used for PR creation.
+            github_token: PAT with ``Contents: Read and write`` and
+                ``Pull requests: Read and write`` on the target repo.
+                Used by Anthropic's git proxy for clone/push, and by the
+                orchestrator host-side for opening PRs via the GitHub
+                REST API. Never enters the session container.
             human_input: Implementation of the ``ask_human`` checkpoint.
                 Default reads from stdin.
             stream_to: Where to mirror live agent text. Default stdout.
@@ -206,7 +202,6 @@ class Orchestrator:
                 repo_url=repo_url,
                 github_token=github_token,
                 phase=phase,
-                vault_ids=[github_vault_id],
                 human_input=human_input,
                 stream_to=stream_to,
             )
