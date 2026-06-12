@@ -76,6 +76,9 @@ successful phase so re-runs resume cleanly.
 
 For the longer story see:
 
+- [`docs/pitch.md`](docs/pitch.md) — _Why this matters._ Market
+  size, technical debt cost data, why current AI agents struggle with
+  refactoring, and where human-in-the-loop earns its keep.
 - [`docs/design.md`](docs/design.md) — _How we got here._ The design
   conversation, the trade-offs we considered, the scope cuts.
 - [`docs/abstractions.md`](docs/abstractions.md) — _Main abstractions._
