@@ -84,6 +84,9 @@ For the longer story see:
 - [`docs/abstractions.md`](docs/abstractions.md) — _Main abstractions._
   Reference: every Managed Agents primitive in use, the event-loop
   contract, the file map.
+- [`docs/candidates.md`](docs/candidates.md) — _Candidate projects to
+  clean._ Hackathon-friendly targets, selection criteria, and a
+  recommended demo path.
 
 ## Constraints baked in
 
